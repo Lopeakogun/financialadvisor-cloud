@@ -201,7 +201,8 @@ def capture_profile_fields(callback_context) -> None:
 
     Best-effort, not full NLU: still won't catch every phrasing.
     """
-    profile = load_profile()
+    user_id = callback_context.user_id
+    profile = load_profile(user_id)
     if not profile.get("name"):
         return None  # ask_name_first handles this turn instead
 
@@ -220,13 +221,13 @@ def capture_profile_fields(callback_context) -> None:
     if len(segments) == len(missing):
         for field, segment in zip(missing, segments):
             value = _EXTRACTORS[field](segment, True) or segment
-            set_profile_field(field, value)
+            set_profile_field(user_id, field, value)
         return None
 
     for field in missing:
         value = _EXTRACTORS[field](reply_text, False)
         if value:
-            set_profile_field(field, value)
+            set_profile_field(user_id, field, value)
 
     return None
 
@@ -244,8 +245,9 @@ def ask_name_first(callback_context) -> types.Content | None:
     user message as the name directly (it's a direct reply to a name
     question, so no NLU is needed) and save it before the LLM even runs.
     """
-    if load_profile().get("name"):
-        return None
+    user_id = callback_context.user_id
+    if load_profile(user_id).get("name"):
+        return None  # already known — e.g. streamlit_app.py's sidebar name field
     if not callback_context.state.get("asked_for_name"):
         callback_context.state["asked_for_name"] = True
         return types.Content(role="model", parts=[types.Part(text=ASK_NAME_MESSAGE)])
@@ -254,7 +256,7 @@ def ask_name_first(callback_context) -> types.Content | None:
     if user_content and user_content.parts:
         reply_text = "".join(part.text or "" for part in user_content.parts).strip()
         if reply_text:
-            set_profile_field("name", reply_text.split("\n")[0][:50])
+            set_profile_field(user_id, "name", reply_text.split("\n")[0][:50])
     return None
 
 

@@ -1,20 +1,23 @@
-"""Local JSON persistence for the user's financial profile.
+"""Per-user JSON persistence for financial profiles.
 
-Single-local-user demo storage: everything lives in one profile.json under
-financial_advisor/data/, which is gitignored since it holds personal
-financial information.
+Multi-user demo storage: one JSON file per user under
+financial_advisor/data/profiles/, keyed by the sidebar-provided user_id
+(see streamlit_app.py). The whole data/ directory is gitignored since it
+holds personal financial information.
 """
 
 import json
+import re
 from pathlib import Path
 
 DATA_DIR = Path(__file__).resolve().parent / "data"
-PROFILE_PATH = DATA_DIR / "profile.json"
+PROFILES_DIR = DATA_DIR / "profiles"
 
 # label: shown to the agent as guidance on what the field means.
 # required: whether the coordinator gates other specialists on this field.
 # Dict order = the order fields should be asked in; "name" comes first
-# since it's also used as the identity key for saved conversation history.
+# since it's also used (via streamlit_app.py's sidebar) as the identity
+# key for saved conversation history.
 PROFILE_SCHEMA = {
     "name": {"label": "First name (used to greet you and save your conversation history)", "required": True},
     "age": {"label": "Age", "required": True},
@@ -36,22 +39,47 @@ PROFILE_SCHEMA = {
 
 REQUIRED_FIELDS = [key for key, spec in PROFILE_SCHEMA.items() if spec["required"]]
 
+_UNSAFE_CHARS_RE = re.compile(r"[^a-z0-9_-]")
 
-def load_profile() -> dict:
-    if not PROFILE_PATH.exists():
+
+def _safe_user_id(user_id: str) -> str:
+    """Sanitize user_id before it ever touches a filesystem path.
+
+    user_id ultimately comes from free-text input (the sidebar name field,
+    open to any visitor on a public deployment), so this guards against
+    path traversal / unsafe filenames rather than trusting the caller to
+    have already sanitized it.
+    """
+    cleaned = _UNSAFE_CHARS_RE.sub("", user_id.strip().lower().replace(" ", "_"))
+    if not cleaned:
+        raise ValueError("user_id must contain at least one alphanumeric character")
+    return cleaned[:100]
+
+
+def _profile_path(user_id: str) -> Path:
+    return PROFILES_DIR / f"{_safe_user_id(user_id)}.json"
+
+
+def load_profile(user_id: str) -> dict:
+    path = _profile_path(user_id)
+    if not path.exists():
         return {}
-    with open(PROFILE_PATH) as f:
+    with open(path) as f:
         return json.load(f)
 
 
-def set_field(field: str, value: str) -> dict:
+def profile_exists(user_id: str) -> bool:
+    return _profile_path(user_id).exists()
+
+
+def set_field(user_id: str, field: str, value: str) -> dict:
     """Save one field and return the full updated profile, or {'error': ...}."""
     if field not in PROFILE_SCHEMA:
         return {"error": f"Unknown field '{field}'. Valid fields: {', '.join(PROFILE_SCHEMA)}"}
-    profile = load_profile()
+    profile = load_profile(user_id)
     profile[field] = value
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with open(PROFILE_PATH, "w") as f:
+    PROFILES_DIR.mkdir(parents=True, exist_ok=True)
+    with open(_profile_path(user_id), "w") as f:
         json.dump(profile, f, indent=2)
     return profile
 

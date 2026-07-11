@@ -1,16 +1,19 @@
-"""Local JSON persistence for the user's financial dashboard inputs.
+"""Per-user JSON persistence for financial dashboard inputs.
 
-Mirrors profile_store.py: single-local-user demo storage in
-financial_advisor/data/ (gitignored). Computed metrics (net worth, cash
-flow, etc.) are derived in plain Python from the raw stored numbers rather
-than left to the LLM to calculate.
+Mirrors profile_store.py: one JSON file per user under
+financial_advisor/data/dashboards/ (gitignored), keyed by the same user_id
+as the profile store. Computed metrics (net worth, cash flow, etc.) are
+derived in plain Python from the raw stored numbers rather than left to
+the LLM to calculate.
 """
 
 import json
 from pathlib import Path
 
+from .profile_store import _safe_user_id
+
 DATA_DIR = Path(__file__).resolve().parent / "data"
-DASHBOARD_PATH = DATA_DIR / "dashboard.json"
+DASHBOARDS_DIR = DATA_DIR / "dashboards"
 
 # numeric fields are stored as floats; required fields gate access to the
 # specialist agents, same pattern as PROFILE_SCHEMA in profile_store.py.
@@ -55,14 +58,19 @@ SPENDING_CATEGORY_FIELDS = [
 ]
 
 
-def load_dashboard() -> dict:
-    if not DASHBOARD_PATH.exists():
+def _dashboard_path(user_id: str) -> Path:
+    return DASHBOARDS_DIR / f"{_safe_user_id(user_id)}.json"
+
+
+def load_dashboard(user_id: str) -> dict:
+    path = _dashboard_path(user_id)
+    if not path.exists():
         return {}
-    with open(DASHBOARD_PATH) as f:
+    with open(path) as f:
         return json.load(f)
 
 
-def set_field(field: str, value) -> dict:
+def set_field(user_id: str, field: str, value) -> dict:
     """Save one field and return the full updated dashboard, or {'error': ...}."""
     if field not in DASHBOARD_SCHEMA:
         return {"error": f"Unknown field '{field}'. Valid fields: {', '.join(DASHBOARD_SCHEMA)}"}
@@ -72,10 +80,10 @@ def set_field(field: str, value) -> dict:
             value = float(str(value).replace(",", "").replace("$", "").strip())
         except ValueError:
             return {"error": f"'{field}' must be a plain number, got {value!r}"}
-    data = load_dashboard()
+    data = load_dashboard(user_id)
     data[field] = value
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with open(DASHBOARD_PATH, "w") as f:
+    DASHBOARDS_DIR.mkdir(parents=True, exist_ok=True)
+    with open(_dashboard_path(user_id), "w") as f:
         json.dump(data, f, indent=2)
     return data
 
@@ -97,11 +105,11 @@ def is_complete(data: dict) -> bool:
 _SPENDING_BREAKDOWN_OFFERED_KEY = "_spending_breakdown_offered"
 
 
-def mark_spending_breakdown_offered() -> None:
-    data = load_dashboard()
+def mark_spending_breakdown_offered(user_id: str) -> None:
+    data = load_dashboard(user_id)
     data[_SPENDING_BREAKDOWN_OFFERED_KEY] = True
-    DATA_DIR.mkdir(parents=True, exist_ok=True)
-    with open(DASHBOARD_PATH, "w") as f:
+    DASHBOARDS_DIR.mkdir(parents=True, exist_ok=True)
+    with open(_dashboard_path(user_id), "w") as f:
         json.dump(data, f, indent=2)
 
 

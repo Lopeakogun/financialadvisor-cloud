@@ -100,8 +100,9 @@ class FinancialCoordinator(BaseAgent):
         )
 
     async def _run_async_impl(self, ctx: InvocationContext) -> AsyncGenerator[Event, None]:
-        dashboard = load_dashboard()
-        if profile_missing_required(load_profile()):
+        user_id = ctx.user_id
+        dashboard = load_dashboard(user_id)
+        if profile_missing_required(load_profile(user_id)):
             chosen_agent = self.profile_agent
         elif dashboard_missing_required(dashboard) or spending_breakdown_pending(dashboard):
             # spending_breakdown_pending covers the optional, proactively-

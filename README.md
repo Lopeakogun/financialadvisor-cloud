@@ -6,13 +6,12 @@ Google's hosted **Gemini** API (via Vertex AI) with a Streamlit chat front
 end, deployable to Streamlit Community Cloud.
 
 This is a cloud-deployable fork of a sibling project that runs the same
-multi-agent design entirely locally on open-source Gemma models via Ollama
-(no API keys, nothing leaves the machine). That local variant can't be
-hosted on Streamlit Community Cloud — a hosted container has no route to
-`localhost` on your laptop — so this fork swaps the model backend for
-Gemini, which *is* reachable from a hosted container, at the cost of
-needing a GCP service account and no longer being fully local/free. See
-"Known limitations" for what did and didn't carry over from that testing.
+multi-agent design entirely locally on open-source models via Ollama (no
+API keys, nothing leaves the machine). That variant can't be hosted on
+Streamlit Community Cloud, since a hosted container has no route to
+`localhost` on a laptop — this fork swaps the model backend for Gemini,
+which is reachable from a hosted container, in exchange for needing a GCP
+service account.
 
 **Educational demo only — not licensed financial advice.**
 
@@ -20,93 +19,87 @@ needing a GCP service account and no longer being fully local/free. See
 
 ```
 financial_advisor/
-  agent.py                     root_agent: "financial_coordinator" (deterministic gate) ->
-                                user_profile | financial_dashboard | specialist_router
-  config.py                    builds the Gemini models (coordinator + sub-agent tiers, both gemini-3.5-flash by default)
-  models.py                    GlobalGemini — Gemini via Vertex AI pinned to the 'global' endpoint (required for gemini-3.x)
-  profile_store.py             local JSON persistence + schema for the user's financial profile (name asked first)
-  dashboard_store.py           local JSON persistence + schema + computed metrics (net worth, etc.) +
-                                budgeting/investing guidance (50/30/20 split, emergency-fund-first investing) +
-                                spending-category breakdown (housing/transportation/food/etc., with the
-                                30%-housing and 36%-debt-to-income guideline checks)
-  wisdom_store.py               curated, attributed personal-finance principles (Dave Ramsey, Bogle,
-                                 Buffett, the 4% rule, etc.) — see "Known limitations" for why this
-                                 is hand-authored content, not the LLM's own recall
+  agent.py                    root_agent: "financial_coordinator" (deterministic gate) ->
+                               user_profile | financial_dashboard | specialist_router
+  config.py                   Gemini model config (gemini-3.5-flash by default)
+  models.py                   GlobalGemini — Gemini via Vertex AI, pinned to the 'global' endpoint
+  profile_store.py            per-user JSON persistence + schema for the financial profile
+  dashboard_store.py          per-user JSON persistence + computed metrics (net worth, cash flow,
+                               savings rate) + budgeting/investing guidance (50/30/20, emergency-
+                               fund-first) + spending-category breakdown with guideline checks
+  wisdom_store.py              curated, attributed personal-finance principles (Dave Ramsey, Bogle,
+                                Buffett, the 4% rule, etc.) — hand-authored, not LLM recall
   tools/
-    market_data.py             yfinance-backed tools: price, fundamentals, history, market overview
-    profile_tools.py           get_profile / update_profile_field tools backed by profile_store.py
-    dashboard_tools.py         get_dashboard_status / update_dashboard_field, backed by dashboard_store.py
+    market_data.py            yfinance-backed: price, fundamentals, history, market overview
+    profile_tools.py          get_profile / update_profile_field, backed by profile_store.py
+    dashboard_tools.py        get_dashboard_status / update_dashboard_field, backed by dashboard_store.py
     wisdom_tools.py            get_financial_wisdom, backed by wisdom_store.py
-    web_search_tools.py        search_financial_advice — no-API-key DuckDuckGo search (ddgs),
-                                filtered to a trusted-domain allowlist; plus ground_if_ungrounded,
-                                strip_unrequested_citations, and track_tool_usage — callbacks that
-                                force real grounding and clean up citations (see "Known limitations")
+    web_search_tools.py        search_financial_advice — DuckDuckGo search (no API key), filtered to
+                                a trusted-domain allowlist, plus callbacks that force real grounding
+                                and strip fabricated citations
   sub_agents/
-    user_profile/
-      user_profile_agent.py     friendly onboarding agent + deterministic "ask/capture name" callback
-    financial_dashboard/
-      financial_dashboard_agent.py  deterministic "ask fields / capture batch replies / show
-                                     summary+guidance" callback, then a second deterministic
-                                     "offer/capture/decline spending breakdown" stage, wrapping a
-                                     friendly LLM for follow-ups
-    risk_profiler/
-      risk_profiler_agent.py    assesses risk tolerance via a few questions (can read the profile)
-    portfolio_analyst/
-      portfolio_analyst_agent.py  allocation / diversification analysis (uses market + profile + dashboard tools)
-    market_research/
-      market_research_agent.py  ticker + broad-market lookups (uses market tools)
-streamlit_app.py                chat UI wrapping an ADK Runner + DatabaseSessionService (persistent, SQLite-
-                                 backed, keyed by the saved profile name). Sidebar stays empty during
-                                 onboarding (the chat itself asks the questions — no point spoiling them
-                                 in a "still needed" list on the side) and only appears once a stage
-                                 completes, showing computed dashboard metrics
+    user_profile/               friendly onboarding agent + deterministic capture callbacks
+    financial_dashboard/        deterministic field-capture + summary, then an optional spending-
+                                 breakdown stage, wrapping an LLM for follow-ups
+    risk_profiler/               assesses risk tolerance
+    portfolio_analyst/           allocation / diversification analysis
+    market_research/             ticker + broad-market lookups
+streamlit_app.py               chat UI: ADK Runner + DatabaseSessionService, sidebar name field as
+                                the multi-user identity gate (see below)
 ```
 
-Note the sub-agent files are named `<name>_agent.py`, not `agent.py` — `adk web`'s
-dropdown discovery matches on the literal filename `agent.py` (see "Known
-limitations"), so any new sub-agent module should follow the same
-`<name>_agent.py` convention to avoid reappearing there.
-
 `root_agent` is a small custom `BaseAgent` (`FinancialCoordinator`), not a
-plain LLM agent. Each turn, it checks completeness directly in Python
-(`profile_store.missing_required`, `dashboard_store.missing_required`, and
-`dashboard_store.spending_breakdown_pending`) and deterministically hands
-the whole turn to the first stage that isn't done yet:
-1. `user_profile` — if required profile fields are still missing.
-2. `financial_dashboard` — if the profile is done but required dashboard
-   inputs (assets, liabilities, income, expenses, emergency fund) aren't,
-   **or** if those are done but the optional spending-category breakdown
-   hasn't been offered yet (`spending_breakdown_pending`, tracked
-   persistently in `dashboard.json`, not session state — see "Known
-   limitations" for why that distinction mattered).
-3. `specialist_router` — once all of the above are resolved (completed or,
-   for the optional breakdown, explicitly declined): an LLM agent that
-   calls one of the three specialists **as a tool** (ADK's `AgentTool`),
-   passing just the relevant question and getting back a finished answer.
+plain LLM agent — each turn it checks completeness directly in Python and
+deterministically routes to the first unfinished stage:
 
-All three of these design choices — the Python-level onboarding gates, and
-`AgentTool` over ADK's native `sub_agents` conversational transfer —
-replaced earlier LLM-instruction-based versions that turned out unreliable
-on these small local models (they'd skip the check, or stall mid-handoff,
-instead of following the intended procedure). See "Known limitations"
-below for the specific reliability numbers and what's still LLM-decided
-(specialist routing) vs. deterministic (the two onboarding gates).
+1. **`user_profile`** — required profile fields still missing.
+2. **`financial_dashboard`** — required dashboard inputs missing, or the
+   optional spending-category breakdown hasn't been offered yet.
+3. **`specialist_router`** — once onboarding is resolved: an LLM agent
+   that calls `risk_profiler` / `portfolio_analyst` / `market_research`
+   **as a tool** (ADK's `AgentTool`) and answers from the result.
+
+Routing/completeness gating is deterministic Python, not an LLM decision —
+an earlier instruction-based version ("call get_profile, then branch") was
+unreliable on small local models, which skipped straight to whatever
+specialist a question superficially matched. See "Known limitations" for
+what's still LLM-judged versus guaranteed by construction.
+
+### Multi-user identity
+
+Many independent visitors can hit the same deployed instance at once, so
+identity can't come from a single global saved profile — that would show
+every visitor whoever's name was saved last. Instead, the sidebar has a
+plain `st.text_input("Your name", ...)`, separate from the chat itself,
+and everything downstream is keyed off it:
+
+- `user_id = raw_name.strip().lower().replace(" ", "_")` is both the ADK
+  session's `user_id` and the filename key for that person's data
+  (`financial_advisor/data/profiles/<user_id>.json`,
+  `dashboards/<user_id>.json`; sanitized in `profile_store._safe_user_id`
+  before it ever touches a filesystem path, since it's free text from any
+  visitor).
+- A **new** name creates a fresh profile and a deterministic session
+  (`session_id = f"{APP_NAME}_{user_id}"`); the app auto-sends a "hi" so
+  the agent greets you and starts onboarding instead of an empty chat box.
+- A name **matching an existing profile** resumes that exact session —
+  same `session_id`, full prior conversation and saved data restored.
+- Every tool/callback reads the user_id from ADK's own context
+  (`callback_context.user_id` / `tool_context.user_id` / `ctx.user_id`),
+  never from a shared global — that's what actually enforces isolation,
+  not just the sidebar UI. Verified locally with two distinct names in
+  the same process: fully isolated data, no bleed between them, and
+  reconnecting under the first name resumed its session with full history.
+
+This mirrors the identity model used by a sibling ADK/Streamlit project
+(a college admissions coach).
 
 ## Setup
 
-1. **Get a GCP service account with Vertex AI access.** This app
-   authenticates to Gemini via Vertex AI using a service account JSON key,
-   not a plain AI Studio API key (reuses the same GCP project/service
-   account as a sibling project, so no new Google Cloud setup is required
-   if you already have one — otherwise: create a GCP project, enable the
-   Vertex AI API, and create a service account key with the
-   `roles/aiplatform.user` role).
-
-2. **Place secrets locally (never committed — see `.gitignore`):**
-
+1. **Get a GCP service account with Vertex AI access** (`roles/aiplatform.user`).
+2. **Place secrets locally** (never committed — see `.gitignore`):
    - `secrets/gcp_service_account.json` — the service account key JSON.
-   - `.streamlit/secrets.toml` — same content, in Streamlit's TOML secrets
-     format, used by `streamlit_app.py`:
+   - `.streamlit/secrets.toml` — same content, Streamlit's TOML format:
 
      ```toml
      GOOGLE_CLOUD_PROJECT = "your-project-id"
@@ -134,7 +127,6 @@ below for the specific reliability numbers and what's still LLM-decided
      ADK_MODEL=gemini-3.5-flash
      ADK_COORDINATOR_MODEL=gemini-3.5-flash
      ```
-
 3. **Create a virtualenv and install dependencies:**
 
    ```bash
@@ -145,27 +137,21 @@ below for the specific reliability numbers and what's still LLM-decided
 
 ## Deploying to Streamlit Community Cloud
 
-1. Push this repo to GitHub (already done if you're reading this from the
-   deployed repo) — `secrets/` and `.streamlit/secrets.toml` stay out of
-   git via `.gitignore`, so the key never touches the repo.
+1. Push this repo to GitHub — `secrets/` and `.streamlit/secrets.toml`
+   stay out of git via `.gitignore`, so the key never touches the repo.
 2. On [share.streamlit.io](https://share.streamlit.io), create a new app
    pointing at this repo, `streamlit_app.py` as the entry point.
-3. In the app's **Settings → Secrets**, paste the exact same TOML shown
-   above (`GOOGLE_CLOUD_PROJECT` + the `[gcp_service_account]` table).
+3. In the app's **Settings → Secrets**, paste the same TOML shown above.
    `streamlit_app.py` reads it via `st.secrets` and bridges it into the
    environment variables ADK's Gemini client expects.
 
 ## Running locally
 
-**Option A — ADK's own dev UI** (best for inspecting agent transfers/tool
-calls while iterating):
+**Option A — ADK's own dev UI** (best for inspecting agent transfers/tool calls):
 
 ```bash
 adk web
 ```
-
-Open the printed local URL and pick `financial_advisor` — the only entry
-in the list, by design (see "Known limitations").
 
 **Option B — Streamlit app** (same UI deployed to Streamlit Community Cloud):
 
@@ -175,405 +161,106 @@ streamlit run streamlit_app.py
 
 ## Notes
 
-- `risk_profiler`, `portfolio_analyst`, and `market_research` append a
-  disclaimer reminding the user this isn't licensed financial advice —
-  keep that instruction if you extend the agents. `user_profile` and
-  `financial_dashboard` only add it once, on the message where onboarding
-  completes, so routine intake questions don't feel like a wall of legal
-  text every turn.
-- `get_stock_price` / `get_stock_fundamentals` / `get_historical_performance`
-  / `get_market_overview` in `financial_advisor/tools/market_data.py` are
-  plain Python functions; ADK derives their tool schema from the type
-  hints and docstrings, so keep those accurate if you modify them.
-  `get_market_overview` covers the S&P 500, Dow, Nasdaq, and VIX for
-  recap/overview/trend questions that aren't about one specific ticker.
-  `market_research` is explicitly told never to answer market-data
-  questions from its own memory — see "Known limitations" for why that
-  instruction exists.
 - **Budgeting/investing guidance** (`dashboard_store.compute_guidance`) is
-  derived from `monthly_income` and `monthly_expenses` using two standard,
-  widely-cited rules of thumb — not personalized advice: a 50/30/20
-  needs/wants/savings budget split, and prioritizing a 6-month emergency
-  fund before recommending the full "savings" share go to investing (if
-  the fund isn't there yet, that share splits evenly between topping it
-  up and investing). It never recommends saving/investing more than
-  `monthly_income - monthly_expenses` actually leaves over — if that's
-  below the 20% target, `savings_shortfall` surfaces the gap instead.
-  Shown in the dashboard-complete chat message and as extra sidebar
-  tiles in `streamlit_app.py`.
+  two standard, widely-cited rules of thumb, not personalized advice: a
+  50/30/20 needs/wants/savings split, and prioritizing a 6-month emergency
+  fund before the full "savings" share goes to investing. Never
+  recommends saving more than `monthly_income - monthly_expenses` actually
+  leaves over.
 - **Financial-guru/book citations** (`wisdom_store.py`) are hand-authored,
-  paraphrased (not verbatim quoted), attributed summaries of well-known
-  personal-finance frameworks — Dave Ramsey's Baby Steps, the 50/30/20
-  rule, Bogle/Buffett on index investing, the Bogleheads three-fund
-  portfolio, the 4% retirement rule, "pay yourself first," etc. 1-2
-  relevant citations are guaranteed to appear in the dashboard-completion
-  message (deterministically selected, not LLM-chosen); `portfolio_analyst`
-  and `risk_profiler` can also call `get_financial_wisdom` on demand for
-  relevant follow-up questions, best-effort (see "Known limitations").
-- **Web search for questions outside the curated wisdom store**
-  (`web_search_tools.search_financial_advice`) uses `ddgs` (DuckDuckGo,
-  no API key — preserves this project's "no credentials anywhere"
-  property) restricted to a `TRUSTED_FINANCIAL_DOMAINS` allowlist
-  (Investopedia, NerdWallet, Bogleheads, IRS.gov, SEC.gov, etc.), falling
-  back to unfiltered results (flagged `filtered: false`) only if nothing
-  from the allowlist comes back. Returns short `{title, url, snippet}`
-  entries for the agent to cite, never full page content. Wired into
-  `portfolio_analyst`, `risk_profiler`, `market_research`, and
-  `financial_dashboard`'s follow-up path — best-effort, see "Known
-  limitations" for how reliably it actually gets used.
-- **Gemini 3.x is only served from Vertex AI's `global` location, not
-  regional endpoints.** `financial_advisor/models.py`'s `GlobalGemini`
-  overrides ADK's default `Gemini` model to build its `google.genai.Client`
-  with `location="global"` explicitly — confirmed necessary against the
-  same GCP project/service account in a sibling project; a regional
+  paraphrased, attributed summaries (Dave Ramsey's Baby Steps, Bogle/
+  Buffett on index investing, the Bogleheads three-fund portfolio, the 4%
+  rule, etc.) — not the model's own recall.
+- **Web search** (`search_financial_advice`) uses `ddgs` (DuckDuckGo, no
+  API key) restricted to a trusted-domain allowlist (Investopedia,
+  NerdWallet, Bogleheads, IRS.gov, SEC.gov, etc.), falling back to
+  unfiltered results only if nothing from the allowlist comes back.
+  Returns short `{title, url, snippet}` entries, never full page content.
+- **Gemini 3.x is only served from Vertex AI's `global` location**, not
+  regional endpoints — `models.py`'s `GlobalGemini` builds its
+  `google.genai.Client` with `location="global"` explicitly; a regional
   location silently fails to serve `gemini-3.5-flash`.
-- **The saved profile's `name` field doubles as the persistent-session
-  identity key.** `streamlit_app.py` uses `DatabaseSessionService`
-  (SQLite, `financial_advisor/data/sessions.db`) instead of an in-memory
-  session service, and resumes the most recent conversation for whatever
-  name is currently saved in the profile (falling back to a generic
-  `"guest"` identity before onboarding gives a name). This is a
-  single-local-user app, not multi-account switching — it's for surviving
-  restarts, not for different people sharing one instance with separate
-  histories.
-- **If the app suddenly fails to import at all** (`NameError` or similar
-  on startup), check `dashboard_store.py`'s `DATA_DIR` constant first —
-  it was found renamed to `DATA1_DIR` at one point (line 12 defined it,
-  line 13 referenced the old name), breaking every import of
-  `financial_advisor.agent` transitively. Caught and fixed, but if a
-  future manual edit reintroduces a similar typo, the whole app — `adk
-  web`, Streamlit, everything — goes down at once, so it's worth knowing
-  where to look first.
+- **Multi-user, not single-local-user**, unlike the sibling local-Ollama
+  project — see "Multi-user identity" above.
+- **Streamlit's rerun model needs a persistent event loop, not
+  `asyncio.run()` per call.** Streamlit re-executes the whole script every
+  interaction; a bare `asyncio.run(...)` tears down and recreates the
+  event loop each time, but the cached `Runner`/`DatabaseSessionService`
+  hold `aiosqlite` connections bound to whichever loop created them —
+  causing intermittent "attached to a different event loop" / closed-loop
+  errors. Fixed with one event loop, created once (`@st.cache_resource`)
+  and run forever in a background daemon thread; all async work goes
+  through `run_sync()` (`asyncio.run_coroutine_threadsafe`) instead of
+  `asyncio.run()`. Verified with a live headless run (see "Verification").
 - **The GCP service account key is the one real secret in this repo.**
   `secrets/gcp_service_account.json` and `.streamlit/secrets.toml` are
-  both gitignored (see `.gitignore`) — the key only ever lives on disk
-  locally or in Streamlit Community Cloud's own Secrets store, never in
-  git. `streamlit_app.py` bridges `st.secrets` into
-  `GOOGLE_APPLICATION_CREDENTIALS`/`GOOGLE_CLOUD_PROJECT` env vars at
-  startup (writing the key to a temp file), which is what ADK's Gemini
-  client actually reads.
-- **Personal data stays local and gitignored.** `financial_advisor/data/`
-  (profile.json, dashboard.json) and `financial_advisor/.env` are excluded
-  in `.gitignore`, and are also caught by the parent repo's broader
-  `*.json` / `*.db` / `.env` rules. `adk web`'s own session database
-  (`financial_advisor/.adk/session.db`, contains full conversation history
-  including anything shared during onboarding) is excluded the same way.
+  both gitignored — the key only ever lives on disk locally or in
+  Streamlit Cloud's own Secrets store, never in git.
+- **Personal data stays local/server-side and gitignored.**
+  `financial_advisor/data/` (`profiles/<user_id>.json`,
+  `dashboards/<user_id>.json`, `sessions.db`) and `financial_advisor/.env`
+  are excluded via `.gitignore`. On Streamlit Cloud this data lives only
+  in that app's container filesystem — never in git, though it also isn't
+  backed up across a redeploy the way a real database would be.
+
+## Verification
+
+- **Secrets never committed**: audited full local git history (not just
+  current state) for `secrets/`, `.streamlit/secrets.toml`, and
+  `financial_advisor/.env` — zero matches, including in unreachable/
+  dangling git objects. Cross-checked against GitHub's own tree API
+  (not just local state). Confirmed clean both before and after the
+  multi-user changes below.
+- **Multi-user isolation**: ran two distinct identities ("jordan", "sam")
+  through the live agent in the same process. Each got a fully separate
+  profile/dashboard file with zero data bleed; reconnecting under a name
+  already used resumed the exact same session, full prior history intact.
+- **Event loop fix**: confirmed the app boots and serves cleanly under a
+  real `streamlit run` (not just a bare Python import, which doesn't
+  exercise Streamlit's session/rerun machinery the same way).
+- **Gemini/Vertex AI connectivity**: live end-to-end run confirmed auth,
+  tool-calling, and real synthesized responses all work.
 
 ## Known limitations
 
-This is a demo, not production-grade agent routing. The deterministic
-onboarding logic (profile/dashboard capture, completeness gating) below is
-unchanged from the sibling local-Ollama project and was extensively
-retested there — that testing carries over here since it's plain Python,
-not model-dependent. The *LLM-judgment* findings (specialist routing,
-grounding, citation behavior) were characterized against a local Gemma
-fine-tune on Ollama and have **not** been independently re-verified against
-Gemini in this fork beyond a basic end-to-end sanity check (Vertex AI auth
-works, tool calls execute, real synthesized responses come back). Gemini
-is a substantially stronger model and may not exhibit the same failure
-rates — or could have different ones; treat the specific numbers below as
-context on *what kinds* of failures to watch for, not as measured Gemini
-behavior.
+This is a demo, not production-grade agent routing.
 
-One new observation from this fork's own testing: sending every profile
-answer in a single rapid-fire message on literally the first turn (before
-`ask_name_first` has asked anything) can cause `capture_profile_fields`'s
-positional pass to mis-segment and save part of a sentence as the `name`
-field, since the segment count won't match the missing-field count. This
-is the same positional/fallback logic described below — a genuinely new
-edge case (not exercised in the original project's tests), not a
-Gemini-specific bug — filed here rather than fixed, since it wasn't part
-of what was asked for this fork.
-
-In the original testing against the live local Ollama server
-(coordinator/router on `12b-ft`, sub-agents on `4b-ft`):
-
-- **Profile-completeness gating (user_profile vs. specialist_router) is
-  deterministic Python, not an LLM decision** — it was tried as an LLM
-  instruction first ("call get_profile, then branch") and that failed
-  every time; the coordinator just skipped straight to whatever specialist
-  the question obviously matched. The current `FinancialCoordinator`
-  `BaseAgent` checks profile completeness itself before invoking any LLM,
-  so this part is reliable by construction, not just by testing.
-- **Specialist routing (risk_profiler / portfolio_analyst / market_research)
-  is still an LLM decision** (`specialist_router`'s `AgentTool` calls), and
-  is not 100% reliable: across repeated trials it correctly calls the right
-  specialist most of the time, but occasionally answers a
-  portfolio-concentration-style question directly from its own knowledge
-  instead of calling `portfolio_analyst` — a reasonable-sounding but
-  ungrounded answer, not a crash. Direct tool calls once a specialist *is*
-  invoked (e.g. `get_stock_price`) have been reliable across every trial.
-- If you see the router answering directly when you expected it to consult
-  a specialist, that's this known failure mode, not a bug. Trying `27b-ft`
-  for the coordinator/router (edit `ADK_COORDINATOR_MODEL` in
-  `financial_advisor/.env`) is the first thing to try if this happens often
-  enough to matter for your use case.
-- **This "answer directly instead of calling a specialist" failure mode is
-  worse than it sounds for market data specifically: it was observed to
-  fabricate plausible-but-wrong index numbers** (a market recap question
-  got confident, specific S&P/Dow/Nasdaq figures that didn't match reality
-  — stale/hallucinated, not fetched) instead of declining or calling
-  `market_research`. The fix applied was tightening `specialist_router`'s
-  own instruction to explicitly cover broad/index-level questions (not
-  just specific tickers) and to explicitly forbid answering market
-  questions from memory — retested and confirmed fixed for that case, but
-  treat any market figure from `specialist_router` itself (as opposed to
-  `market_research`) with suspicion, and prefer rephrasing the question if
-  you're unsure whether a lookup actually happened.
-- **`adk web`'s dropdown recursively lists every directory containing a
-  file literally named `agent.py`** (a plain filename match, not a check
-  for a real agent inside it — confirmed by reading the installed
-  `google-adk` source). With sub-agents living in their own packages, this
-  used to clutter the dropdown with entries for each specialist that
-  didn't even work if selected (`ValueError: No root_agent found`, since
-  they don't export a symbol literally named `root_agent`). Fixed by
-  renaming every sub-agent module to `<name>_agent.py` — keep that
-  convention for any new sub-agent, and never let a sub-package's
-  `__init__.py` contain the literal substring `"root_agent"`.
-- **The model can produce fluent, correct-looking text that describes an
-  action it never actually took.** Asking `user_profile` to "extract the
-  user's name from their reply and call `update_profile_field`" produced
-  replies that used the name naturally ("Nice to meet you, Sarah!") but
-  never actually called the tool — the profile stayed empty. This is a
-  different failure mode from the earlier "skips the tool entirely and
-  declines to help" ones: here the text output looks completely correct,
-  which makes it easy to miss without checking the underlying saved data,
-  not just eyeballing the chat transcript. The fix follows the same
-  pattern as the profile/dashboard completeness gates: don't ask the LLM
-  to make a call it's proven unreliable at — `user_profile_agent.py`'s
-  `ask_name_first` is a `before_agent_callback` that deterministically
-  asks for the name (skipping the LLM for that turn) and then
-  deterministically saves the next raw user reply as the name (skipping
-  LLM extraction, since a direct reply to "what's your first name?"
-  needs no NLU). If you add fields where correctness of *storage*, not
-  just conversational tone, matters, consider whether it needs the same
-  treatment before trusting the LLM's tool-calling for it.
-- **The same gap showed up for every other required profile field too —
-  user-reported, reproduced, and now fixed for all of them.** Reported
-  live: the user said "I've never invested before" and was later asked
-  about investing experience again. Reproduced with a batch reply
-  combining all remaining profile fields in one message ("30, single,
-  $95k a year stable job, California, moderate risk, ive never invested
-  before, 10 year horizon") — the agent's own reply text correctly
-  referenced the info, but `load_profile()` afterward showed only `name`
-  saved; everything else was silently dropped. A first, narrower fix
-  covered just `investment_experience`/`risk_tolerance` (small, keyword-
-  matchable vocabularies), but the same retest showed the other five
-  fields still silently failing, plus confusing re-asks of fields that
-  actually *had* saved. Generalized into `user_profile_agent.py`'s
-  `capture_profile_fields` (`before_agent_callback`, alongside
-  `ask_name_first`), which runs before every LLM turn once `name` is
-  known:
-  1. **Positional pass**: split the reply on commas/semicolons/newlines.
-     If the segment count exactly matches the number of currently-missing
-     fields (the common case, since the agent always asks in a fixed
-     order and users tend to answer in the same order), map segments to
-     fields positionally and extract each with a per-field parser (age:
-     leading number or "I'm X"/"X years old"; income: dollar amount +
-     stability word; location: matched against a US state/country list;
-     time_horizon: "X years" or long/short-term/retirement; household
-     status/risk tolerance/investment experience: keyword vocabularies as
-     before). A segment that doesn't parse cleanly is still saved as-is
-     — positional matching already gives high confidence which field it
-     answers, so a raw save beats losing it.
-  2. **Fallback pass**: if the reply doesn't cleanly segment (flowing
-     prose, or only some fields answered), scan the whole reply for each
-     still-missing field's *context-anchored* pattern only — no bare
-     numbers or low-confidence guesses here, since a wrong silent save is
-     worse than an occasional re-ask.
-  Retested three ways: the original 7-field batch reply now saves all 7
-  correctly (`{'name': 'Jordan', 'age': '30', 'household_status':
-  'Single', 'income': '$95k, stable', 'location': 'California',
-  'risk_tolerance': 'Moderate', 'investment_experience': 'No experience —
-  never invested before', 'time_horizon': '10 years'}`), with the agent's
-  own follow-up correctly summarizing everything back for confirmation;
-  and a messy, partial, non-segmented reply ("I'm 25 and I live in Texas.
-  I've been investing for a few years so I'd say I have some experience
-  with it.") correctly captured age/location/investment_experience via
-  the fallback pass while correctly leaving the genuinely-unanswered
-  fields (household_status, income, risk_tolerance, time_horizon) open
-  — and the agent's next question asked only about those, no redundant
-  re-asks. Still best-effort, not full NLU — unusual phrasings can still
-  slip through the fallback pass, but the common cases (clean batch
-  answers and reasonably clear prose) are now covered.
-- **Fixed: the fallback pass's own bare-word keyword matching had false
-  positives.** User-reported: household status ("living situation") had
-  stopped being asked at all. Root cause, found by code review and
-  confirmed with test phrasings: the fallback pass (see above) scans
-  *every* subsequent message for *every* still-missing field's keywords,
-  and several patterns were bare, common English words — "single,"
-  "conservative," "aggressive," "experienced" — that show up constantly
-  outside their onboarding meaning. Confirmed all four of these
-  incidentally matched and silently saved a wrong value with zero
-  relation to the actual question: "Do I have a **single** source of
-  income?" → `household_status: 'Single'`; "Give me a **conservative**
-  estimate of my expenses" → `risk_tolerance: 'Conservative'`; "I want an
-  **aggressive** savings plan" → `risk_tolerance: 'Aggressive'`; "I
-  **experienced** a big loss last year" → `investment_experience:
-  'Experienced'`. Once wrongly saved, the field silently vanishes from
-  "missing" and is never asked about again — a data-*accuracy* bug that
-  manifests identically to the earlier data-*loss* bugs (field never
-  gets a real answer), just via the opposite mechanism. Fixed by giving
-  `household_status`, `risk_tolerance`, and `investment_experience` two
-  pattern tiers: STRICT (requires enough surrounding context — "I'm
-  single," "conservative investor," "risk-averse" — to be confident the
-  message is actually answering that question) for the fallback
-  whole-message scan, and LOOSE (STRICT plus bare words) only for
-  positional mode, where the segment is already confirmed to correspond
-  to that field by position, so a bare word is safe there. Retested: all
-  four false-positive phrasings now correctly extract nothing, the
-  original legitimate phrasings ("I'm single and live alone," "I'd say
-  I'm pretty conservative...") still extract correctly, and the full
-  7-field batch-reply regression test still saves everything correctly —
-  no loss of the fix from earlier, just removal of the false-positive
-  risk it introduced.
-- **`financial_dashboard` needed the same treatment, more broadly.**
-  Testing with a *partially* pre-filled dashboard (unlike earlier tests
-  that always started from empty, which happened to mask this) exposed
-  three separate reliability failures in one flow: on a cold turn it
-  sometimes never called `get_dashboard_status` at all and just
-  re-asked/invented questions ignoring already-saved fields; on a batch
-  reply (e.g. "my emergency fund has 5000 dollars") it produced a
-  confident, specific-sounding confirmation ("I've set that to $5000")
-  with zero tool calls and no actual save; and once every field *was*
-  saved, it kept asking stale already-answered questions instead of
-  noticing completion and presenting the summary. `financial_dashboard_agent.py`'s
-  `ask_missing_dashboard_fields` (`before_agent_callback`) now handles
-  all three deterministically: compute the true missing-field list and
-  ask for exactly those; if a reply contains exactly as many numbers as
-  fields asked, save them positionally without depending on a tool call;
-  and build the completion summary + guidance message directly in Python
-  (`_build_completion_message`) rather than asking the LLM to notice
-  completion and read the numbers out correctly. The LLM is only invoked
-  for genuinely messy/partial replies and post-completion follow-ups —
-  retested against both a partial-dashboard and a fresh-empty-dashboard
-  scenario, matching hand-calculated expected values exactly in both.
-- **Fixed: the model was skipping `search_financial_advice` instead of
-  calling it.** Live testing initially found the model reliably chose
-  **not** to call it, even on questions squarely outside
-  `wisdom_store.py`'s topics — e.g. asked `portfolio_analyst` directly
-  "how often should I rebalance my portfolio?" it answered fluently and
-  plausibly entirely from memory, zero tool calls. Unlike the
-  profile/dashboard fields, "does this question need a web lookup" is
-  inherent LLM judgment, not a yes/no state check, so it couldn't get the
-  same before-the-fact deterministic treatment. Instead,
-  `web_search_tools.ground_if_ungrounded` (an `after_model_callback` on
-  `portfolio_analyst`, `risk_profiler`, `market_research`, and
-  `financial_dashboard`) catches it **after** the fact: if a response has
-  no tool call, no tool was already called earlier that turn, and its
-  non-question content is substantial (`_declarative_length` — sentence-
-  aware, so a long ungrounded answer can't dodge detection just by
-  tacking on a trailing "want me to look that up?"), it discards that
-  response and injects a synthetic `search_financial_advice` function
-  call instead. ADK executes a callback-returned response exactly like a
-  real model response, so this gets run for real and looped back to the
-  model with actual results — reusing the "synthesize from a given tool
-  result" behavior this project has seen work reliably throughout,
-  instead of trusting the model to decide to fetch one. Retested against
-  the exact rebalancing question that exposed this: it now calls
-  `search_financial_advice`, gets a real Vanguard-sourced result, and
-  answers "according to Vanguard, an annual rebalance would typically
-  yield the best results" — a real citation, not a recital from memory.
-  Confirmed no regression on legitimately-grounded single-tool-call
-  answers (e.g. `market_research` presenting a real fetched stock price
-  isn't second-guessed or re-triggered).
-- **Fixed: process narration and citation fabrication.** Two follow-on
-  issues surfaced once grounding started working:
-  1. The model would narrate its own process instead of just acting —
-     "would you like me to search/look that up?", "let me check", "I
-     found through my research that...". All agent instructions now
-     explicitly forbid this: call the tool silently, answer with what it
-     returns.
-  2. More seriously: even when genuinely grounded, the model sometimes
-     **fabricated additional sources beyond what was actually
-     retrieved**. Asked the rebalancing question, `search_financial_advice`
-     returned 5 real results (SoFi, Farm Bureau, Zynergy Retirement,
-     optimizedportfolio.com, and one Vanguard-content mirror) — but the
-     model's answer cited "Vanguard," "Retirement Researcher,"
-     "Investor.gov," "Farther.com," "The Conversation," and a YouTube
-     channel, none of which correspond to the 5 actual URLs returned. It
-     blended one real mention (a snippet did discuss Vanguard's research)
-     with several invented ones, presented with equal confidence — a
-     more dangerous failure than not searching at all, since the citation
-     *looks* verified. The fix: agents no longer name the specific
-     website/source by default at all (only the *information* is used to
-     ground the answer) — only citing a source if the user explicitly
-     asks, and even then only one "literally present in the tool result."
-     Named principles/frameworks from `wisdom_store.py` (Dave Ramsey,
-     Bogle, the 4% rule, etc.) are unaffected and still always cited by
-     name, since that content is hand-authored and carries no fabrication
-     risk. Retested: the same rebalancing question now produces one
-     citation ("Based on Vanguard's research...", traceable to real
-     snippet content) instead of six mixed real/invented ones — a real
-     improvement, though not a perfect one: the model still named that
-     one source despite not being asked, showing the same imperfect
-     instruction-following seen elsewhere in this project.
-  3. **Fixed further with a deterministic safety net.** Since instruction
-     compliance alone wasn't 100%, `web_search_tools.strip_unrequested_citations`
-     (an additional `after_model_callback`) catches what the instruction
-     missed: if `search_financial_advice` ran this turn (tracked via a new
-     `track_tool_usage` `after_tool_callback`, distinct from
-     `get_financial_wisdom` so wanted wisdom citations are never touched)
-     and the user's own message doesn't look like it's asking for a
-     source (regex on "source", "cite", "link", "where did you find",
-     etc.), it pattern-matches and strips citation lead-ins ("According to
-     X, ...", "Based on X's research, ...", "X suggests that ...") from
-     the response text. This is a best-effort text filter for the
-     specific phrasings actually observed live, not a general NLP
-     solution — it won't catch every possible citation phrasing, but it
-     meaningfully reduces the residual gap instruction-following alone
-     left open. Retested: the same rebalancing question now sometimes
-     produces no named source at all ("the consensus among financial
-     advisors suggests...") and the tool call still grounds the
-     substance of the answer either way.
-- **This does not fix `specialist_router` skipping delegation to a
-  specialist in the first place** (the router-level version of the same
-  failure mode) — `ground_if_ungrounded` lives on the specialists
-  themselves, so it only helps once one is actually reached. That gap is
-  harder to close the same way, since forcing a *specific* specialist
-  delegation requires guessing which of three is right, not injecting one
-  well-defined tool call. Still open; `27b-ft` for the router is the
-  first thing to try if it matters for your use case.
-- **Spending category breakdown, and a real bug in wiring it up.**
-  `financial_dashboard` now offers a second, optional stage after the
-  required-fields summary: a breakdown of monthly expenses by category
-  (housing, transportation, food, utilities, insurance, debt payments,
-  entertainment, other), computed against two more widely-cited
-  underwriting guidelines — housing at or under ~30% of income, and total
-  debt-to-income (housing + debt payments) at or under ~36% — with
-  `wisdom_store.py` citations for both, the same "hand-authored, not
-  LLM-recalled" pattern as the rest of the guidance. It's skippable (says
-  so explicitly, recognizes "skip"/"no thanks"/etc.) since it's
-  enrichment, not required.
-
-  Building this exposed a real architecture bug, caught before shipping:
-  the first version tracked "has this been offered" in ADK session
-  state, and marked it at the moment the offer was *shown*. Two problems,
-  both found via live testing rather than assumed: (1) the top-level
-  `FinancialCoordinator` gate only ever checked the 5 *required* dashboard
-  fields before routing straight to `specialist_router` — for a session
-  where those were already complete (e.g. a returning user, or simply a
-  fresh test with pre-seeded data), `financial_dashboard` was never
-  invoked at all, so the new stage never got a chance to run; and (2)
-  marking "offered" at ask-time (rather than at actual resolution) meant
-  that *if* the gate did route there, the user's own reply — the answer
-  to the question just asked — would get routed to `specialist_router`
-  on the very next turn instead of back to `financial_dashboard` to
-  actually be captured. Fixed by moving the tracking to persistent
-  storage (`dashboard_store.spending_breakdown_pending`, read from
-  `dashboard.json`, not session state, so it survives a fresh session
-  the same way required-field completeness already does) and only
-  marking it resolved at genuine resolution points (completed, declined,
-  or given up after one unparseable reply) rather than at the initial
-  ask. Retested three ways: full 8-category batch reply → all captured
-  correctly with accurate math (verified by hand: housing 36.7% of
-  income → correctly flagged over the 30% guideline; DTI 46.7% →
-  correctly flagged over 36%; categorized total vs. reported
-  monthly_expenses discrepancy correctly signed and reported); decline
-  ("no thanks") → correctly marked resolved with zero spending fields
-  saved, and the *next* turn correctly reached `specialist_router`
-  instead of getting stuck. One remaining cosmetic-only quirk: the LLM's
-  own free-text reply immediately after a decline was once observed
-  acknowledging the decline and then still asking about housing spend in
-  the same breath — confusing phrasing, but no data was incorrectly
-  saved, so it's a tone issue, not a functional one.
+- **Specialist routing is still an LLM decision**, not deterministic:
+  `specialist_router` correctly calls the right specialist most of the
+  time, but can occasionally answer directly from its own knowledge
+  instead of calling a specialist — including, in earlier local-model
+  testing, fabricating plausible-but-wrong market index numbers instead of
+  calling `market_research`. Mitigated by an explicit instruction against
+  answering market questions from memory, plus (on the specialists
+  themselves) an `after_model_callback` that detects an ungrounded
+  response and forces a real tool call. Not closed at the router level —
+  if you see it answer directly when you expected a specialist, that's
+  this known gap, not a bug.
+- **Citation behavior**: agents don't name a source unless asked, and even
+  then only one literally present in a tool result — added after earlier
+  testing showed the model blending one real citation with several
+  invented ones when asked to name sources. A deterministic
+  `strip_unrequested_citations` pass is a safety net on top of the
+  instruction, not a complete guarantee.
+- **Deterministic capture is best-effort, not full NLU.** Profile/
+  dashboard field capture (`capture_profile_fields`,
+  `ask_missing_dashboard_fields`) handles clean batch replies and
+  reasonably clear prose via a positional pass + context-anchored
+  fallback, but unusual phrasings can still slip through. One known edge
+  case: answering every onboarding question in a single rapid-fire
+  message on literally the first turn can mis-segment and save part of a
+  sentence as the `name` field, since segment count won't match the
+  missing-field count.
+- **LLM-judgment findings (routing, grounding, citations) were
+  characterized against a local Gemma fine-tune on Ollama**, not
+  independently re-verified against Gemini beyond the basic sanity check
+  in "Verification" above. Gemini is a substantially stronger model and
+  may not exhibit the same failure rates, or could have different ones —
+  treat the above as *what kinds* of failures to watch for, not as
+  measured Gemini behavior. The deterministic logic (onboarding/dashboard
+  capture, completeness gating, multi-user isolation) is plain Python, so
+  it isn't model-dependent and carries over exactly.
+- **`adk web`'s dropdown lists any directory containing a file literally
+  named `agent.py`.** Sub-agent modules are named `<name>_agent.py`
+  instead to avoid cluttering it with non-functional entries — keep that
+  convention for any new sub-agent.

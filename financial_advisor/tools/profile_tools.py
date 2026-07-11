@@ -1,9 +1,11 @@
 """ADK tools exposing the local user profile store to agents."""
 
+from google.adk.tools.tool_context import ToolContext
+
 from ..profile_store import load_profile, missing_required, set_field
 
 
-def get_profile() -> dict:
+def get_profile(tool_context: ToolContext) -> dict:
     """Get the user's saved financial profile and which required fields are still missing.
 
     Returns:
@@ -11,11 +13,11 @@ def get_profile() -> dict:
         user) and 'missing_required' (list of required field keys not yet
         answered, e.g. "age", "risk_tolerance").
     """
-    profile = load_profile()
+    profile = load_profile(tool_context.user_id)
     return {"profile": profile, "missing_required": missing_required(profile)}
 
 
-def update_profile_field(field: str, value: str) -> dict:
+def update_profile_field(field: str, value: str, tool_context: ToolContext) -> dict:
     """Save or update a single field in the user's financial profile.
 
     Args:
@@ -30,7 +32,7 @@ def update_profile_field(field: str, value: str) -> dict:
         'missing_required' (required fields still missing), or a dict with
         an 'error' key if the field name isn't recognized.
     """
-    result = set_field(field, value)
+    result = set_field(tool_context.user_id, field, value)
     if "error" in result:
         return result
     return {"profile": result, "missing_required": missing_required(result)}

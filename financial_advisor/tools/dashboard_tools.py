@@ -1,5 +1,7 @@
 """ADK tools exposing the local financial dashboard store to agents."""
 
+from google.adk.tools.tool_context import ToolContext
+
 from ..dashboard_store import compute_guidance, compute_summary, load_dashboard, missing_required, set_field
 
 
@@ -9,7 +11,7 @@ def _summary_with_guidance(data: dict) -> dict:
     return summary
 
 
-def get_dashboard_status() -> dict:
+def get_dashboard_status(tool_context: ToolContext) -> dict:
     """Get the user's saved financial dashboard inputs and computed summary.
 
     Returns:
@@ -22,11 +24,11 @@ def get_dashboard_status() -> dict:
         emergency_fund_target, emergency_fund_monthly_contribution — once
         monthly_income and monthly_expenses are both known).
     """
-    data = load_dashboard()
+    data = load_dashboard(tool_context.user_id)
     return {"data": data, "missing_required": missing_required(data), "summary": _summary_with_guidance(data)}
 
 
-def update_dashboard_field(field: str, value: str) -> dict:
+def update_dashboard_field(field: str, value: str, tool_context: ToolContext) -> dict:
     """Save or update a single financial dashboard input field.
 
     Args:
@@ -42,7 +44,7 @@ def update_dashboard_field(field: str, value: str) -> dict:
         get_dashboard_status), or a dict with an 'error' key if the field
         name isn't recognized or a numeric field couldn't be parsed.
     """
-    result = set_field(field, value)
+    result = set_field(tool_context.user_id, field, value)
     if "error" in result:
         return result
     return {"data": result, "missing_required": missing_required(result), "summary": _summary_with_guidance(result)}

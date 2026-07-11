@@ -176,7 +176,8 @@ def ask_spending_breakdown(callback_context) -> types.Content | None:
     very next reply (the answer to that ask) would get routed to
     specialist_router instead of back here to be captured.
     """
-    data = load_dashboard()
+    user_id = callback_context.user_id
+    data = load_dashboard(user_id)
     if missing_required(data):
         return None  # required stage isn't done yet — not our turn
 
@@ -187,19 +188,19 @@ def ask_spending_breakdown(callback_context) -> types.Content | None:
         reply_text = "".join(part.text or "" for part in user_content.parts) if user_content and user_content.parts else ""
         if _DECLINE_RE.search(reply_text):
             callback_context.state["spending_breakdown_fields_asked"] = None
-            mark_spending_breakdown_offered()
+            mark_spending_breakdown_offered(user_id)
             return None  # resolved (declined) — let the LLM respond naturally
         numbers = _extract_numbers(reply_text)
         if len(numbers) == len(previously_asked):
             for field, value in zip(previously_asked, numbers):
-                set_dashboard_field(field, value)
+                set_dashboard_field(user_id, field, value)
 
-    data = load_dashboard()
+    data = load_dashboard(user_id)
     still_missing = [field for field in SPENDING_CATEGORY_FIELDS if data.get(field) is None]
 
     if not still_missing:
         callback_context.state["spending_breakdown_fields_asked"] = None
-        mark_spending_breakdown_offered()  # resolved (completed)
+        mark_spending_breakdown_offered(user_id)  # resolved (completed)
         return types.Content(role="model", parts=[types.Part(text=_build_spending_breakdown_message(data))])
 
     if still_missing == previously_asked:
@@ -207,7 +208,7 @@ def ask_spending_breakdown(callback_context) -> types.Content | None:
         # a decline — give up after one try rather than looping forever;
         # resolved (gave up), let the LLM take this turn naturally.
         callback_context.state["spending_breakdown_fields_asked"] = None
-        mark_spending_breakdown_offered()
+        mark_spending_breakdown_offered(user_id)
         return None
 
     labels = [DASHBOARD_SCHEMA[field]["label"] for field in still_missing]
@@ -233,6 +234,7 @@ def ask_missing_dashboard_fields(callback_context) -> types.Content | None:
     asking stale questions instead of presenting the summary). All three
     are handled in Python instead of trusted to the LLM.
     """
+    user_id = callback_context.user_id
     previously_asked = callback_context.state.get("dashboard_fields_asked")
     was_incomplete = bool(previously_asked)
 
@@ -243,9 +245,9 @@ def ask_missing_dashboard_fields(callback_context) -> types.Content | None:
             numbers = _extract_numbers(reply_text)
             if len(numbers) == len(previously_asked):
                 for field, value in zip(previously_asked, numbers):
-                    set_dashboard_field(field, value)
+                    set_dashboard_field(user_id, field, value)
 
-    data = load_dashboard()
+    data = load_dashboard(user_id)
     missing = missing_required(data)
 
     if not missing:
