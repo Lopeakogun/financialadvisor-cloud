@@ -1,0 +1,22 @@
+.venv/
+__pycache__/
+*.pyc
+.env
+financial_advisor/.env
+.DS_Store
+
+# Personal financial data — never commit
+financial_advisor/data/
+
+# adk web's local session store (conversation history) — never commit
+financial_advisor/.adk/
+*.db
+
+# Claude Code local session/tooling state — not project source
+.claude/
+
+# GCP service account key + Streamlit secrets — never commit. Paste the
+# contents of .streamlit/secrets.toml into Streamlit Community Cloud's
+# app-level Secrets settings instead when deploying.
+secrets/
+.streamlit/secrets.toml
