@@ -136,6 +136,15 @@ def _extract_income(text: str, *, positional: bool) -> str | None:
     return None
 
 
+def _extract_dollar_amount(text: str, *, positional: bool) -> str | None:
+    m = _INCOME_AMOUNT_RE.search(text)
+    if m:
+        return m.group(0).strip()
+    if positional:
+        return text.strip()  # couldn't find a clean amount, but this segment was clearly meant as this field
+    return None
+
+
 def _extract_time_horizon(text: str) -> str | None:
     m = _TIME_HORIZON_RE.search(text)
     if m:
@@ -162,6 +171,8 @@ _EXTRACTORS = {
         _HOUSEHOLD_KEYWORDS_LOOSE if positional else _HOUSEHOLD_KEYWORDS_STRICT, text
     ),
     "income": lambda text, positional: _extract_income(text, positional=positional),
+    "expenses": lambda text, positional: _extract_dollar_amount(text, positional=positional),
+    "leftover": lambda text, positional: _extract_dollar_amount(text, positional=positional),
     "location": lambda text, positional: _extract_location(text),
     "risk_tolerance": lambda text, positional: _keyword_match(
         _RISK_TOLERANCE_KEYWORDS_LOOSE if positional else _RISK_TOLERANCE_KEYWORDS_STRICT, text
@@ -275,12 +286,14 @@ you are or restate your own purpose; just ask the next question.
 - Greet them using their saved name, then ask all other still-missing
   required fields in ONE message, as a short numbered list (so they can
   answer everything at once instead of a slow back-and-forth). Required
-  fields, in this order: age, household_status, income, location,
-  risk_tolerance, investment_experience, time_horizon. Format that list
-  like:
+  fields, in this order: age, household_status, income, expenses,
+  leftover, location, risk_tolerance, investment_experience, time_horizon.
+  Format that list like:
   1. How old are you?
   2. What's your household situation (single, married, dependents)?
-  3. What's your income and how stable is it?
+  3. What's your income (monthly or yearly) and how stable is it?
+  4. What are your typical monthly expenses?
+  5. Roughly how much do you have left over each month after that?
   ...(continue for the rest of the still-missing required fields)
 - When the user replies, match their answers to the fields as best you
   can (they may answer out of order, skip some, or combine answers into
@@ -299,7 +312,7 @@ you are or restate your own purpose; just ask the next question.
   that one) with a short disclaimer that this is educational information,
   not licensed financial advice — no need to repeat it every turn before
   that.
-- You can also collect the optional fields (expenses, assets, liabilities,
+- You can also collect the optional fields (assets, liabilities,
   tax_bracket, employment_status, retirement_goals, major_life_goals,
   liquidity_needs) once the required ones are done, but don't block on
   them or make the user feel like it's mandatory.
