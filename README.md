@@ -192,6 +192,19 @@ streamlit run streamlit_app.py
   and run forever in a background daemon thread; all async work goes
   through `run_sync()` (`asyncio.run_coroutine_threadsafe`) instead of
   `asyncio.run()`. Verified with a live headless run (see "Verification").
+- **Gemini 3.x requires a `thought_signature` on every function-call part**,
+  including ones the app fabricates itself. `web_search_tools.ground_if_ungrounded`
+  synthesizes a `function_call` Part to force a real search when the model
+  skips one — that part never had a real signature, and Gemini rejected
+  the next turn once it was replayed back as conversation history (`400
+  INVALID_ARGUMENT: Function call is missing a thought_signature`, seen
+  live on the deployed app). Fixed by setting
+  `thought_signature=SKIP_THOUGHT_SIGNATURE_VALIDATOR` (a sentinel ADK
+  ships in `google.adk.utils.content_utils` for exactly this case — a
+  model/tool-call part the app synthesizes rather than one Gemini
+  actually produced) on that Part. Verified across a 3-turn conversation
+  that reproduces the original failure shape (forced search, then two
+  follow-ups replaying it as history) with no errors.
 - **The GCP service account key is the one real secret in this repo.**
   `secrets/gcp_service_account.json` and `.streamlit/secrets.toml` are
   both gitignored — the key only ever lives on disk locally or in

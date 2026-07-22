@@ -13,6 +13,7 @@ from urllib.parse import urlparse
 
 from ddgs import DDGS
 from google.adk.models.llm_response import LlmResponse
+from google.adk.utils.content_utils import SKIP_THOUGHT_SIGNATURE_VALIDATOR
 from google.genai import types
 
 TRUSTED_FINANCIAL_DOMAINS = {
@@ -162,7 +163,16 @@ def ground_if_ungrounded(callback_context, llm_response: LlmResponse) -> LlmResp
                         id=f"forced_search_{uuid.uuid4().hex[:8]}",
                         name="search_financial_advice",
                         args={"query": query},
-                    )
+                    ),
+                    # Gemini 3.x requires every function_call part to carry a
+                    # thought_signature (its own internal reasoning token) —
+                    # this part is fabricated by us, not something the model
+                    # actually produced, so it never has one. This sentinel
+                    # tells the backend to accept it anyway rather than
+                    # rejecting the whole request on the next turn (this was
+                    # crashing the deployed app with a 400 INVALID_ARGUMENT
+                    # once conversation history replayed this part back).
+                    thought_signature=SKIP_THOUGHT_SIGNATURE_VALIDATOR,
                 )
             ],
         )
